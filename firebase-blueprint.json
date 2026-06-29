@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "Candidate": {
+      "title": "Candidate",
+      "description": "Information about the exam taker",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "dob": { "type": "string" },
+        "gender": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["name", "dob", "gender", "phone", "address", "timestamp"]
+    },
+    "AnswerDetail": {
+      "title": "AnswerDetail",
+      "description": "Details of an answered question",
+      "type": "object",
+      "properties": {
+        "questionNo": { "type": "integer" },
+        "questionText": { "type": "string" },
+        "options": { "type": "array" },
+        "correctAnswer": { "type": "string" },
+        "candidateAnswer": { "type": "string" },
+        "explanation": { "type": "string" },
+        "isCorrect": { "type": "boolean" }
+      },
+      "required": ["questionNo", "questionText", "correctAnswer", "candidateAnswer", "isCorrect"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "A user's contest submission containing candidate info, scores, answers, and optional essay evaluation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "candidate": { "$ref": "#/entities/Candidate" },
+        "examSet": { "type": "integer" },
+        "score": { "type": "integer" },
+        "essay": { "type": "string" },
+        "answersDetail": { "type": "array" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["candidate", "examSet", "score", "essay", "answersDetail", "createdAt"]
+    }
+  },
+  "firestore": {
+    "submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "The collection of all contest submissions"
+    }
+  }
+}

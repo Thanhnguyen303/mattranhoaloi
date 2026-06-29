@@ -25,7 +25,8 @@ import {
   Cpu, 
   ShieldAlert, 
   Search, 
-  ChevronRight 
+  ChevronRight,
+  Database
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import confetti from "canvas-confetti";
@@ -161,16 +162,21 @@ export default function App() {
         
         let finalSched = serverSched;
         if (isServerDefault && localSched) {
-          finalSched = localSched;
-          // Sync custom local schedule back to server
-          try {
-            await fetch("/api/schedule", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(localSched),
-            });
-          } catch (syncErr) {
-            console.warn("Failed to sync local schedule to server", syncErr);
+          const isOutdated = localSched.endTime === "2026-07-02T18:00" || localSched.startTime === "2026-06-25T08:00";
+          if (isOutdated) {
+            localStorage.removeItem("contest_schedule");
+          } else {
+            finalSched = localSched;
+            // Sync custom local schedule back to server
+            try {
+              await fetch("/api/schedule", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(localSched),
+              });
+            } catch (syncErr) {
+              console.warn("Failed to sync local schedule to server", syncErr);
+            }
           }
         }
         
@@ -547,19 +553,86 @@ export default function App() {
       return;
     }
 
+    let headers = [
+      "STT",
+      "Họ và Tên",
+      "Năm sinh",
+      "Giới tính",
+      "Số điện thoại",
+      "Địa chỉ / Đơn vị",
+      "Bộ đề thi",
+      "Điểm trắc nghiệm (Tối đa 20)",
+      "Thời gian nộp",
+      "Điểm Tiêu chí 1",
+      "Nhận xét Tiêu chí 1",
+      "Điểm Tiêu chí 2",
+      "Nhận xét Tiêu chí 2",
+      "Điểm Tiêu chí 3",
+      "Nhận xét Tiêu chí 3",
+      "Nhận xét chung",
+      "Bài luận tự luận"
+    ];
+
+    // Add columns for Q1 to Q20
+    for (let i = 1; i <= 20; i++) {
+      headers.push(`Câu ${i}`);
+    }
+
     let csvContent = "data:text/csv;charset=utf-8,\uFEFF";
-    csvContent += "STT,Họ và Tên,Năm sinh,Giới tính,Số điện thoại,Địa chỉ / Đơn vị,Bộ đề thi,Điểm trắc nghiệm (Tối đa 20),Bài viết luận tự luận,Thời gian nộp\n";
+    csvContent += headers.map(h => `"${h.replace(/"/g, '""')}"`).join(",") + "\n";
 
     submissions.forEach((item, index) => {
-      const name = item.candidate.name.replace(/"/g, '""');
-      const dob = (item.candidate.dob || "").replace(/"/g, '""');
-      const gender = (item.candidate.gender || "").replace(/"/g, '""');
-      const phone = (item.candidate.phone || "").replace(/"/g, '""');
-      const address = (item.candidate.address || "").replace(/"/g, '""');
-      const essay = item.essay ? item.essay.replace(/"/g, '""').replace(/\n/g, ' ') : "Không tham gia tự luận";
+      const name = (item.candidate?.name || "").replace(/"/g, '""');
+      const dob = (item.candidate?.dob || "").replace(/"/g, '""');
+      const gender = (item.candidate?.gender || "").replace(/"/g, '""');
+      const phone = (item.candidate?.phone || "").replace(/"/g, '""');
+      const address = (item.candidate?.address || "").replace(/"/g, '""');
+      const examSet = `Đề ${item.examSet}`;
+      const score = `${item.score}/20`;
       const timestamp = item.createdAt ? new Date(item.createdAt).toLocaleString("vi-VN") : "-";
+      
+      const eval1 = item.essayEvaluation?.criteria1 ?? "-";
+      const fb1 = (item.essayEvaluation?.feedback1 || "-").replace(/"/g, '""').replace(/\r?\n/g, ' ');
+      const eval2 = item.essayEvaluation?.criteria2 ?? "-";
+      const fb2 = (item.essayEvaluation?.feedback2 || "-").replace(/"/g, '""').replace(/\r?\n/g, ' ');
+      const eval3 = item.essayEvaluation?.criteria3 ?? "-";
+      const fb3 = (item.essayEvaluation?.feedback3 || "-").replace(/"/g, '""').replace(/\r?\n/g, ' ');
+      const comment = (item.essayEvaluation?.overallComment || "-").replace(/"/g, '""').replace(/\r?\n/g, ' ');
+      const essay = item.essay ? item.essay.replace(/"/g, '""').replace(/\r?\n/g, ' ') : "Không tham gia tự luận";
 
-      csvContent += `${index + 1},"${name}","${dob}","${gender}","${phone}","${address}",Đề ${item.examSet},${item.score},"${essay}","${timestamp}"\n`;
+      const row = [
+        `"${index + 1}"`,
+        `"${name}"`,
+        `"${dob}"`,
+        `"${gender}"`,
+        `"${phone}"`,
+        `"${address}"`,
+        `"${examSet}"`,
+        `"${score}"`,
+        `"${timestamp}"`,
+        `"${eval1}"`,
+        `"${fb1}"`,
+        `"${eval2}"`,
+        `"${fb2}"`,
+        `"${eval3}"`,
+        `"${fb3}"`,
+        `"${comment}"`,
+        `"${essay}"`
+      ];
+
+      // Add answers for Q1 to Q20
+      for (let qIdx = 1; qIdx <= 20; qIdx++) {
+        const answerObj = item.answersDetail?.find(a => a.questionNo === qIdx);
+        if (answerObj) {
+          const ansText = (answerObj.candidateAnswer || "Không trả lời").replace(/"/g, '""');
+          const isCorrectStr = answerObj.isCorrect ? "Đúng" : `Sai (Đáp án: ${answerObj.correctAnswer})`;
+          row.push(`"${ansText} (${isCorrectStr})"`);
+        } else {
+          row.push(`"-"`);
+        }
+      }
+
+      csvContent += row.join(",") + "\n";
     });
 
     const encodedUri = encodeURI(csvContent);
@@ -569,7 +642,28 @@ export default function App() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    triggerToast("Kết xuất tệp báo cáo bảng điểm CSV thành công!");
+    triggerToast("Kết xuất tệp báo cáo bảng điểm CSV nâng cao thành công!");
+  };
+
+  // Backup JSON
+  const handleBackupJSON = async () => {
+    try {
+      const res = await fetch("/api/submissions");
+      if (!res.ok) throw new Error("Yêu cầu tải dữ liệu thất bại");
+      const list = await res.json();
+      
+      const dataStr = "data:text/json;charset=utf-8,\uFEFF" + encodeURIComponent(JSON.stringify(list, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", `Sao_Luu_Co_So_Du_Lieu_Hoi_Thi_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      document.body.removeChild(downloadAnchor);
+      triggerToast("Sao lưu toàn bộ cơ sở dữ liệu (JSON) thành công!");
+    } catch (err) {
+      console.error("Backup JSON failed", err);
+      triggerToast("Không thể tải bản sao lưu dữ liệu từ máy chủ", "error");
+    }
   };
 
   // Delete submission
@@ -817,7 +911,10 @@ export default function App() {
             <div className="w-24 h-[1.5px] bg-gradient-to-r from-transparent via-amber-400 to-transparent mx-auto"></div>
 
             {/* Main Title - Luxurious Gold Text Effect */}
-            <h1 className="font-sans font-extrabold uppercase tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-100 bg-clip-text text-transparent drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] text-xs sm:text-sm md:text-lg lg:text-xl xl:text-2xl leading-relaxed sm:leading-relaxed md:leading-snug text-center">
+            <h1 
+              style={{ fontSize: "20px" }}
+              className="font-sans font-extrabold uppercase tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-100 bg-clip-text text-transparent drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] leading-relaxed sm:leading-relaxed md:leading-snug text-center"
+            >
               CUỘC THI TRỰC TUYẾN HÀNH TRÌNH 50 NĂM NGÀY THÀNH PHỐ SÀI GÒN - GIA ĐỊNH CHÍNH THỨC, VINH DỰ MANG TÊN CHỦ TỊCH HỒ CHÍ MINH
             </h1>
           </div>
@@ -1380,7 +1477,13 @@ export default function App() {
                 </p>
               </div>
               
-              <div className="flex gap-2 shrink-0">
+              <div className="flex gap-2 shrink-0 flex-wrap justify-center">
+                <button
+                  onClick={handleBackupJSON}
+                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+                >
+                  <Database className="w-4 h-4" /> Sao Lưu Dữ Liệu (JSON)
+                </button>
                 <button
                   onClick={handleExportCSV}
                   className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
