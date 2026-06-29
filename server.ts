@@ -4,8 +4,8 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, getDocs, doc, setDoc, deleteDoc } from "firebase/firestore";
 
 dotenv.config();
 
@@ -24,24 +24,27 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// Initialize Firebase Firestore from config file using firebase-admin
+// Initialize Firebase Firestore from config file using firebase client SDK
 let db: any = null;
 try {
   const configPath = path.join(process.cwd(), "firebase-applet-config.json");
   if (fs.existsSync(configPath)) {
     const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    if (getApps().length === 0) {
-      initializeApp({
-        projectId: config.projectId,
-      });
-    }
-    db = getFirestore(config.firestoreDatabaseId || "(default)");
-    console.log("Firebase Admin Firestore initialized successfully with DB ID:", config.firestoreDatabaseId);
+    const firebaseApp = initializeApp({
+      apiKey: config.apiKey,
+      authDomain: config.authDomain,
+      projectId: config.projectId,
+      storageBucket: config.storageBucket,
+      messagingSenderId: config.messagingSenderId,
+      appId: config.appId
+    });
+    db = getFirestore(firebaseApp, config.firestoreDatabaseId || "(default)");
+    console.log("Firebase Client Firestore initialized successfully with DB ID:", config.firestoreDatabaseId);
   } else {
     console.warn("firebase-applet-config.json not found. Firestore will fall back to local JSON.");
   }
 } catch (error) {
-  console.error("Failed to initialize Firebase Admin Firestore, falling back to local storage:", error);
+  console.error("Failed to initialize Firebase Client Firestore, falling back to local storage:", error);
 }
 
 enum OperationType {
@@ -84,8 +87,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  console.warn('Firestore Operation Failed (Gracefully falling back): ', JSON.stringify(errInfo));
 }
 
 // Helper to read submissions
@@ -93,9 +95,9 @@ async function readSubmissions(): Promise<any[]> {
   // First try to read from Firestore
   if (db) {
     try {
-      const querySnapshot = await db.collection("submissions").get();
+      const querySnapshot = await getDocs(collection(db, "submissions"));
       const list: any[] = [];
-      querySnapshot.forEach((docSnap: any) => {
+      querySnapshot.forEach((docSnap) => {
         list.push({ id: docSnap.id, ...docSnap.data() });
       });
       // Synchronize back to local file for backup
@@ -144,7 +146,8 @@ async function saveSubmission(id: string, submission: any) {
   // Save to Firestore
   if (db) {
     try {
-      await db.collection("submissions").doc(id).set(submission);
+      const docRef = doc(db, "submissions", id);
+      await setDoc(docRef, submission);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `submissions/${id}`);
     }
@@ -162,7 +165,8 @@ async function deleteSubmission(id: string): Promise<boolean> {
   // Delete from Firestore
   if (db) {
     try {
-      await db.collection("submissions").doc(id).delete();
+      const docRef = doc(db, "submissions", id);
+      await deleteDoc(docRef);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `submissions/${id}`);
     }
