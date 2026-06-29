@@ -38,16 +38,52 @@ interface Toast {
   type: "success" | "error" | "info";
 }
 
+const formatVietnameseDateTime = (dateStr: string) => {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    return `${hours}h${minutes} ngày ${day}-${month}-${year}`;
+  } catch (e) {
+    return dateStr;
+  }
+};
+
 export default function App() {
-  // Navigation
-  const [activeTab, setActiveTab] = useState<"portal" | "auth" | "dashboard">("portal");
+  // Navigation with local persistence
+  const [activeTabState, setActiveTabState] = useState<"portal" | "auth" | "dashboard">(
+    () => (localStorage.getItem("contest_active_tab") as "portal" | "auth" | "dashboard") || "portal"
+  );
   const [adminPin, setAdminPin] = useState("");
-  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [isAdminAuthenticatedState, setIsAdminAuthenticatedState] = useState<boolean>(
+    () => localStorage.getItem("contest_admin_auth") === "true"
+  );
+
+  const activeTab = activeTabState;
+  const isAdminAuthenticated = isAdminAuthenticatedState;
+
+  const setActiveTab = (tab: "portal" | "auth" | "dashboard") => {
+    setActiveTabState(tab);
+    localStorage.setItem("contest_active_tab", tab);
+  };
+
+  const setIsAdminAuthenticated = (auth: boolean) => {
+    setIsAdminAuthenticatedState(auth);
+    if (auth) {
+      localStorage.setItem("contest_admin_auth", "true");
+    } else {
+      localStorage.removeItem("contest_admin_auth");
+    }
+  };
 
   // Core App states
   const [schedule, setSchedule] = useState<ContestSchedule>({
-    startTime: "2026-06-25T08:00",
-    endTime: "2026-07-02T18:00"
+    startTime: "2026-06-28T00:00",
+    endTime: "2026-07-02T23:59"
   });
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -109,42 +145,118 @@ export default function App() {
   }, []);
 
   const fetchSchedule = async () => {
+    let localSched: ContestSchedule | null = null;
+    const local = localStorage.getItem("contest_schedule");
+    if (local) {
+      try {
+        localSched = JSON.parse(local);
+      } catch (e) {}
+    }
+
     try {
       const res = await fetch("/api/schedule");
       if (res.ok) {
-        const data = await res.json();
-        setSchedule(data);
-        setScheduleFormStart(data.startTime);
-        setScheduleFormEnd(data.endTime);
+        const serverSched = await res.json();
+        const isServerDefault = serverSched.startTime === "2026-06-28T00:00" && serverSched.endTime === "2026-07-02T23:59";
+        
+        let finalSched = serverSched;
+        if (isServerDefault && localSched) {
+          finalSched = localSched;
+          // Sync custom local schedule back to server
+          try {
+            await fetch("/api/schedule", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(localSched),
+            });
+          } catch (syncErr) {
+            console.warn("Failed to sync local schedule to server", syncErr);
+          }
+        }
+        
+        setSchedule(finalSched);
+        setScheduleFormStart(finalSched.startTime);
+        setScheduleFormEnd(finalSched.endTime);
+        localStorage.setItem("contest_schedule", JSON.stringify(finalSched));
+      } else {
+        throw new Error();
       }
     } catch (e) {
       console.warn("Falls back to local schedule due to network issue");
-      const local = localStorage.getItem("contest_schedule");
-      if (local) {
-        const parsed = JSON.parse(local);
-        setSchedule(parsed);
-        setScheduleFormStart(parsed.startTime);
-        setScheduleFormEnd(parsed.endTime);
+      if (localSched) {
+        setSchedule(localSched);
+        setScheduleFormStart(localSched.startTime);
+        setScheduleFormEnd(localSched.endTime);
       } else {
-        setScheduleFormStart("2026-06-25T08:00");
-        setScheduleFormEnd("2026-07-02T18:00");
+        const fallback = {
+          startTime: "2026-06-28T00:00",
+          endTime: "2026-07-02T23:59"
+        };
+        setSchedule(fallback);
+        setScheduleFormStart(fallback.startTime);
+        setScheduleFormEnd(fallback.endTime);
       }
     }
   };
 
   const fetchSubmissions = async () => {
+    let localSubmissions: Submission[] = [];
+    const local = localStorage.getItem("contest_submissions");
+    if (local) {
+      try {
+        localSubmissions = JSON.parse(local);
+      } catch (e) {
+        console.error("Error parsing local submissions", e);
+      }
+    }
+
     try {
       const res = await fetch("/api/submissions");
       if (res.ok) {
-        const data = await res.json();
-        setSubmissions(data);
+        const serverSubmissions: Submission[] = await res.json();
+        
+        // Merge server and local submissions
+        const mergedMap = new Map<string, Submission>();
+        
+        localSubmissions.forEach(s => {
+          const id = s.id || `${s.candidate.phone}_${new Date(s.createdAt).getTime()}`;
+          s.id = id;
+          mergedMap.set(id, s);
+        });
+        
+        serverSubmissions.forEach(s => {
+          const id = s.id || `${s.candidate.phone}_${new Date(s.createdAt).getTime()}`;
+          s.id = id;
+          mergedMap.set(id, s);
+        });
+        
+        const mergedList = Array.from(mergedMap.values());
+        mergedList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        
+        setSubmissions(mergedList);
+        localStorage.setItem("contest_submissions", JSON.stringify(mergedList));
+        
+        // Proactively sync local-only submissions to the server
+        const serverIds = new Set(serverSubmissions.map(s => s.id));
+        for (const sub of localSubmissions) {
+          if (sub.id && !serverIds.has(sub.id)) {
+            try {
+              await fetch("/api/submissions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(sub)
+              });
+            } catch (syncErr) {
+              console.warn("Failed to sync local submission to server", syncErr);
+            }
+          }
+        }
+      } else {
+        throw new Error();
       }
     } catch (e) {
-      console.warn("Falls back to local storage submissions");
-      const local = localStorage.getItem("contest_submissions");
-      if (local) {
-        setSubmissions(JSON.parse(local));
-      }
+      console.warn("Falls back to local storage submissions only");
+      setSubmissions(localSubmissions);
     }
   };
 
@@ -337,6 +449,14 @@ export default function App() {
       if (res.ok) {
         const savedData = await res.json();
         setSubmittedResult(savedData);
+        // Save to local storage as well!
+        const currentLocal = localStorage.getItem("contest_submissions");
+        let localList: Submission[] = [];
+        if (currentLocal) {
+          try { localList = JSON.parse(currentLocal); } catch (err) {}
+        }
+        const updatedLocal = [savedData, ...localList.filter((s: Submission) => s.id !== savedData.id)];
+        localStorage.setItem("contest_submissions", JSON.stringify(updatedLocal));
         // Refresh local submissions cache
         fetchSubmissions();
       } else {
@@ -464,6 +584,15 @@ export default function App() {
       });
       if (res.ok) {
         setSubmissions((prev) => prev.filter((s) => s.id !== id));
+        // Remove from local storage as well
+        const local = localStorage.getItem("contest_submissions");
+        if (local) {
+          try {
+            const parsed = JSON.parse(local);
+            const filtered = parsed.filter((s: Submission) => s.id !== id);
+            localStorage.setItem("contest_submissions", JSON.stringify(filtered));
+          } catch (err) {}
+        }
         triggerToast("Xóa kết quả thành công.");
       } else {
         throw new Error("Xóa thất bại trên server");
@@ -529,7 +658,9 @@ export default function App() {
         } else {
           // Fallback if patch fails
           setSelectedSubmission(updatedSubmission);
-          setSubmissions((prev) => prev.map((s) => s.id === selectedSubmission.id ? updatedSubmission : s));
+          const updatedList = submissions.map((s) => s.id === selectedSubmission.id ? updatedSubmission : s);
+          setSubmissions(updatedList);
+          localStorage.setItem("contest_submissions", JSON.stringify(updatedList));
           triggerToast("Đã chấm điểm AI tạm thời thành công!");
         }
 
@@ -572,7 +703,9 @@ export default function App() {
       }
     } catch (e) {
       setSelectedSubmission(updatedSubmission);
-      setSubmissions((prev) => prev.map((s) => s.id === selectedSubmission.id ? updatedSubmission : s));
+      const updatedList = submissions.map((s) => s.id === selectedSubmission.id ? updatedSubmission : s);
+      setSubmissions(updatedList);
+      localStorage.setItem("contest_submissions", JSON.stringify(updatedList));
       triggerToast("Lưu điểm thủ công thành công cục bộ.");
     }
   };
@@ -674,21 +807,9 @@ export default function App() {
           <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/60 pointer-events-none"></div>
 
           {/* Glassmorphism Content Card - Extremely Luxurious & Elegant */}
-          <div className="relative z-10 max-w-5xl mx-auto backdrop-blur-md bg-slate-950/65 border border-amber-500/30 p-6 md:p-8 rounded-2xl shadow-2xl space-y-3">
+          <div className="relative z-10 max-w-5xl mx-auto backdrop-blur-md bg-slate-950/65 border border-amber-500/30 p-4 md:p-8 rounded-2xl shadow-2xl space-y-3 w-full">
             {/* Elegant Subtitle */}
-            <h2 
-              style={{
-                fontSize: "15px",
-                width: "964px",
-                maxWidth: "100%",
-                height: "30.75px",
-                lineHeight: "27.75px",
-                marginBottom: "2px",
-                paddingLeft: "0px",
-                marginLeft: "0px"
-              }}
-              className="font-black tracking-widest text-amber-300 uppercase drop-shadow-sm font-sans"
-            >
+            <h2 className="font-black tracking-widest text-amber-300 uppercase drop-shadow-sm font-sans text-[10px] xs:text-xs sm:text-sm md:text-base leading-normal sm:leading-relaxed mb-1 text-center">
               ỦY BAN MẶT TRẬN TỔ QUỐC VIỆT NAM VÀ CÁC TỔ CHỨC CHÍNH TRỊ - XÃ HỘI PHƯỜNG HÒA LỢI
             </h2>
             
@@ -696,21 +817,21 @@ export default function App() {
             <div className="w-24 h-[1.5px] bg-gradient-to-r from-transparent via-amber-400 to-transparent mx-auto"></div>
 
             {/* Main Title - Luxurious Gold Text Effect */}
-            <h1 className="text-xs sm:text-sm md:text-base lg:text-xl xl:text-2xl font-sans font-extrabold uppercase leading-snug tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-100 bg-clip-text text-transparent drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+            <h1 className="font-sans font-extrabold uppercase tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-100 bg-clip-text text-transparent drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] text-xs sm:text-sm md:text-lg lg:text-xl xl:text-2xl leading-relaxed sm:leading-relaxed md:leading-snug text-center">
               CUỘC THI TRỰC TUYẾN HÀNH TRÌNH 50 NĂM NGÀY THÀNH PHỐ SÀI GÒN - GIA ĐỊNH CHÍNH THỨC, VINH DỰ MANG TÊN CHỦ TỊCH HỒ CHÍ MINH
             </h1>
           </div>
         </div>
 
         {/* Navigation Tabs */}
-        <div className="max-w-7xl mx-auto px-4 py-4 flex justify-center">
-          <div className="flex gap-3 justify-center">
+        <div className="max-w-7xl mx-auto px-4 py-3.5 flex justify-center w-full">
+          <div className="grid grid-cols-2 gap-2 w-full max-w-sm sm:flex sm:flex-row sm:w-auto sm:gap-3 sm:justify-center">
             <button 
               id="nav-btn-portal"
               onClick={() => setActiveTab("portal")} 
-              className={`px-5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm border ${
+              className={`px-4 py-2.5 sm:px-5 sm:py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm border w-full sm:w-auto cursor-pointer ${
                 activeTab === "portal" 
-                  ? "bg-[#ee1212] text-white border-[#ee1212] shadow-sm animate-pulse" 
+                  ? "bg-[#ee1212] text-white border-[#ee1212] shadow-sm" 
                   : "bg-white hover:bg-red-50/40 text-slate-600 border-slate-200 hover:text-[#ee1212]"
               }`}
             >
@@ -725,7 +846,7 @@ export default function App() {
                   setActiveTab("auth");
                 }
               }} 
-              className={`px-5 py-2 rounded-lg text-xs font-bold transition-all active:scale-[1.05] flex items-center gap-1.5 shadow-sm border ${
+              className={`px-4 py-2.5 sm:px-5 sm:py-2 rounded-lg text-xs font-bold transition-all active:scale-[1.05] flex items-center justify-center gap-1.5 shadow-sm border w-full sm:w-auto cursor-pointer ${
                 activeTab === "auth" || activeTab === "dashboard"
                   ? "bg-[#ff0000] text-white border-[#ff0000] shadow-sm"
                   : "bg-white hover:bg-red-50/40 text-slate-600 border-slate-200 hover:text-[#ff0000]"
@@ -797,8 +918,8 @@ export default function App() {
                 </div>
 
                 <p className="text-xs text-slate-500 mt-3 font-medium">
-                  {contestStatus === "NOT_STARTED" && `Cổng thi sẽ mở vào lúc: ${new Date(schedule.startTime).toLocaleString("vi-VN")}`}
-                  {contestStatus === "RUNNING" && `Thời hạn cuối nộp bài: ${new Date(schedule.endTime).toLocaleString("vi-VN")}`}
+                  {contestStatus === "NOT_STARTED" && `Cổng thi sẽ mở vào lúc: ${formatVietnameseDateTime(schedule.startTime)}`}
+                  {contestStatus === "RUNNING" && `Thời hạn cuối nộp bài: ${formatVietnameseDateTime(schedule.endTime)}`}
                   {contestStatus === "ENDED" && "Cảm ơn toàn thể nhân dân đã hăng hái tham gia hiến kế sáng tạo."}
                 </p>
               </motion.div>
@@ -906,13 +1027,13 @@ export default function App() {
                   </div>
 
                   <div className="bg-red-50/40 p-4 rounded-xl border border-red-100 text-xs text-slate-700 leading-relaxed space-y-1">
-                    <h4 className="font-bold flex items-center gap-1.5 text-red-800 text-xs">
-                      <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" /> QUY CHẾ HỘI THI TRỰC TUYẾN:
+                    <h4 className="font-bold flex items-center gap-1.5 text-red-800 text-xs uppercase">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" /> THỂ LỆ HỘI THI TRỰC TUYẾN:
                     </h4>
                     <ul className="list-disc pl-5 space-y-1 font-medium text-slate-600">
-                      <li>Mỗi thí sinh sử dụng 1 số điện thoại được tham gia tối đa <strong>5 lượt làm bài</strong> để cải thiện kết quả.</li>
+                      <li>Mỗi thí sinh được tham gia tối đa <strong>5 lượt làm bài</strong>.</li>
                       <li>Đề thi gồm <strong>20 câu hỏi trắc nghiệm</strong> bốc ngẫu nhiên từ ngân hàng câu hỏi.</li>
-                      <li>Phần tự luận hiến kế xây dựng phường và thành phố <strong>(không bắt buộc, tối đa 5000 ký tự)</strong>.</li>
+                      <li>Phần tự luận hiến kế xây dựng phường và thành phố <strong>(bắt buộc, viết tối đa 5000 ký tự)</strong>.</li>
                       <li>Thời gian làm bài quy định tối đa là <strong>20 phút</strong>.</li>
                     </ul>
                   </div>
@@ -932,7 +1053,7 @@ export default function App() {
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 
                 {/* Questions content */}
-                <div className="lg:col-span-2 space-y-6">
+                <div className="lg:col-span-2 space-y-6 order-last lg:order-first">
                   
                   {/* Exam Card Info Header */}
                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 relative">
@@ -1030,9 +1151,11 @@ export default function App() {
                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 space-y-4">
                     <div className="border-b pb-4">
                       <span className="text-[10px] font-extrabold text-red-700 bg-red-50 px-3 py-1 rounded-full uppercase tracking-wider border border-red-100">
-                        Phần II: Tự Luận Hiến Kế (Không bắt buộc)
+                        Phần II: Tự Luận Hiến Kế (Bắt buộc)
                       </span>
-                      <h2 className="text-base font-bold text-slate-800 mt-2">Đề bài tự luận phát triển địa phương:</h2>
+                      <h2 className="text-base font-bold text-slate-800 mt-2">
+                        Đề bài tự luận phát triển địa phương <span className="text-red-500">*</span>:
+                      </h2>
                     </div>
 
                     <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs md:text-sm text-slate-700 leading-relaxed font-medium">
@@ -1063,7 +1186,13 @@ export default function App() {
                   {/* Submission Action */}
                   <div className="flex justify-end">
                     <button
-                      onClick={() => setIsConfirmSubmitOpen(true)}
+                      onClick={() => {
+                        if (!essayResponse.trim()) {
+                          triggerToast("Vui lòng viết bài tự luận hiến kế xây dựng phường và thành phố (bắt buộc) trước khi nộp bài!", "error");
+                          return;
+                        }
+                        setIsConfirmSubmitOpen(true);
+                      }}
                       className="px-8 py-4 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm hover:shadow transition-all uppercase flex items-center gap-2 tracking-wide text-sm cursor-pointer"
                     >
                       <Send className="w-4 h-4" /> Nộp Bài Thi Lên Hệ Thống
@@ -1073,7 +1202,7 @@ export default function App() {
                 </div>
 
                 {/* Right side navigation and stats */}
-                <div className="space-y-6">
+                <div className="space-y-6 order-first lg:order-last">
                   {/* Candidate Info */}
                   <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
                     <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Thí Sinh Hiện Tại</h3>
@@ -1364,7 +1493,8 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto">
+                  {/* Desktop Table view (visible on lg and up) */}
+                  <div className="hidden lg:block overflow-x-auto">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="bg-slate-100/80 text-slate-600 uppercase tracking-wider border-b border-slate-200 font-bold">
@@ -1451,6 +1581,89 @@ export default function App() {
                         )}
                       </tbody>
                     </table>
+                  </div>
+
+                  {/* Mobile & Tablet Card View (visible on screens below lg) */}
+                  <div className="block lg:hidden divide-y divide-slate-100 max-h-[600px] overflow-y-auto">
+                    {filteredSubmissions.length === 0 ? (
+                      <div className="p-8 text-center text-slate-400 font-medium text-xs">
+                        Không tìm thấy kết quả nào trùng khớp.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-slate-50/30">
+                        {filteredSubmissions.map((item, index) => {
+                          const subId = item.id || `sub_${index}`;
+                          return (
+                            <div key={subId} className="bg-white rounded-xl p-4 border border-slate-200 shadow-sm flex flex-col justify-between gap-3">
+                              <div className="space-y-2">
+                                <div className="flex justify-between items-start gap-1">
+                                  <div>
+                                    <h4 className="font-extrabold text-slate-800 text-sm leading-tight">{item.candidate.name}</h4>
+                                    <span className="text-[9px] text-slate-400 block mt-0.5 font-medium">
+                                      Nộp: {new Date(item.createdAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" })}
+                                    </span>
+                                  </div>
+                                  <span className={`px-2 py-0.5 rounded-full font-bold text-xs shrink-0 ${
+                                    item.score >= 15 ? "bg-emerald-50 text-emerald-800 border border-emerald-100" : "bg-rose-50 text-rose-700 border border-rose-100"
+                                  }`}>
+                                    {item.score} / 20 điểm
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-y-1 gap-x-2 text-xs border-t pt-2 border-slate-100 font-medium text-slate-600">
+                                  <div>
+                                    <span className="text-slate-400">Năm sinh:</span> {item.candidate.dob}
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-400">Giới tính:</span>{' '}
+                                    <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-extrabold ${
+                                      item.candidate.gender === "Nam" ? "bg-red-50 text-red-700" : "bg-pink-50 text-pink-700"
+                                    }`}>
+                                      {item.candidate.gender}
+                                    </span>
+                                  </div>
+                                  <div className="col-span-2 font-mono mt-0.5">
+                                    <span className="text-slate-400 font-sans">SĐT:</span> {item.candidate.phone}
+                                  </div>
+                                  <div className="col-span-2 text-[11px] truncate text-slate-500 mt-0.5" title={item.candidate.address}>
+                                    <span className="text-slate-400">Đơn vị:</span> {item.candidate.address}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 mt-2 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                                  <span className="text-[10px] font-extrabold text-red-700 font-mono bg-red-50 px-1.5 py-0.5 rounded border border-red-100 shrink-0">Đề {item.examSet}</span>
+                                  {item.essay ? (
+                                    <span className="text-[10px] font-mono text-amber-800 truncate flex-grow" title={item.essay}>
+                                      📝 Luận: {item.essay.substring(0, 35)}...
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 italic">Không viết tự luận</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex gap-2 border-t pt-2.5 border-slate-100 justify-end shrink-0">
+                                <button
+                                  onClick={() => {
+                                    setSelectedSubmission(item);
+                                    setSelectedSubmissionIndex(index);
+                                  }}
+                                  className="flex-1 py-1.5 rounded-lg bg-[#ee1212] hover:bg-red-800 text-white text-xs font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
+                                >
+                                  <Eye className="w-3.5 h-3.5" /> Xem Bài
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteSubmission(item.id!, index)}
+                                  className="py-1.5 px-3 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold flex items-center justify-center cursor-pointer transition-all active:scale-95"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
 

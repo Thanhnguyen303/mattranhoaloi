@@ -55,8 +55,8 @@ function readSchedule(): { startTime: string; endTime: string } {
     console.error("Error reading schedule file:", error);
   }
   return {
-    startTime: "2026-06-25T08:00",
-    endTime: "2026-07-02T18:00"
+    startTime: "2026-06-28T00:00",
+    endTime: "2026-07-02T23:59"
   };
 }
 
