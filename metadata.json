@@ -1,0 +1,6 @@
+{
+  "name": "Trang Web Hoi Thi 50 Nam Thanh Pho",
+  "description": "Cuộc thi trực tuyến tìm hiểu lịch sử Hành trình 50 năm ngày Thành phố Sài Gòn - Gia Định chính thức mang tên Chủ tịch Hồ Chí Minh.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
