@@ -32,6 +32,14 @@ import { motion, AnimatePresence } from "motion/react";
 import confetti from "canvas-confetti";
 import { Candidate, Question, AnswerDetail, EssayEvaluation, Submission, ContestSchedule } from "./types";
 import { questionsDB, generateFixedExamSet } from "./questions";
+import { 
+  initAuth, 
+  googleSignIn, 
+  googleSignOut, 
+  createGoogleSpreadsheet, 
+  syncSubmissionsToGoogleSheet 
+} from "./lib/googleSheets";
+import { User as FirebaseUser } from "firebase/auth";
 
 interface Toast {
   id: string;
@@ -112,7 +120,7 @@ export default function App() {
   const [submittedResult, setSubmittedResult] = useState<Submission | null>(null);
 
   // Admin section states
-  const [adminSelectedTab, setAdminSelectedTab] = useState<"results" | "examsets" | "schedule">("results");
+  const [adminSelectedTab, setAdminSelectedTab] = useState<"results" | "examsets" | "schedule" | "sheets">("results");
   const [adminSelectedSet, setAdminSelectedSet] = useState(1);
   const [adminSearchQuery, setAdminSearchQuery] = useState("");
   const [selectedSubmission, setSelectedSubmission] = useState<Submission | null>(null);
@@ -120,6 +128,15 @@ export default function App() {
   const [isAiGrading, setIsAiGrading] = useState(false);
   const [scheduleFormStart, setScheduleFormStart] = useState("");
   const [scheduleFormEnd, setScheduleFormEnd] = useState("");
+
+  // Google Sheets integration states
+  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = useState<string>(
+    () => localStorage.getItem("contest_google_spreadsheet_id") || ""
+  );
+  const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [isCreatingSheet, setIsCreatingSheet] = useState(false);
 
   // Ref for exam timer
   const examTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -138,6 +155,48 @@ export default function App() {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Google Auth integration listener
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+      }
+    );
+    return () => {
+      if (typeof unsubscribe === "function") {
+        unsubscribe();
+      }
+    };
+  }, []);
+
+  // Synchronize Google Sheets config (spreadsheetId & googleToken) to the server
+  useEffect(() => {
+    if (googleToken && spreadsheetId) {
+      fetch("/api/sheets/config", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          spreadsheetId: spreadsheetId.trim(),
+          accessToken: googleToken
+        })
+      })
+      .then(res => res.json())
+      .then(data => {
+        console.log("Successfully synchronized Google Sheets config to backend:", data);
+      })
+      .catch(err => {
+        console.error("Failed to sync Google Sheets config to backend:", err);
+      });
+    }
+  }, [googleToken, spreadsheetId]);
 
   // Initial Fetches
   useEffect(() => {
@@ -546,6 +605,70 @@ export default function App() {
     triggerToast("Đã đăng xuất tài khoản quản trị.");
   };
 
+  // Google Sheets API handlers
+  const handleGoogleSignIn = async () => {
+    try {
+      const res = await googleSignIn();
+      if (res) {
+        setGoogleUser(res.user);
+        setGoogleToken(res.accessToken);
+        triggerToast(`Đã kết nối tài khoản Google: ${res.user.email}`);
+      }
+    } catch (err: any) {
+      triggerToast(err.message || "Đăng nhập Google thất bại!", "error");
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    try {
+      await googleSignOut();
+      setGoogleUser(null);
+      setGoogleToken(null);
+      triggerToast("Đã ngắt kết nối tài khoản Google.");
+    } catch (err: any) {
+      triggerToast("Lỗi ngắt kết nối Google.", "error");
+    }
+  };
+
+  const handleCreateSpreadsheet = async () => {
+    if (!googleToken) {
+      triggerToast("Vui lòng kết nối tài khoản Google trước!", "error");
+      return;
+    }
+    setIsCreatingSheet(true);
+    try {
+      const title = `Hành Trình 50 Năm - Danh Sách Bài Thi (${new Date().toLocaleDateString("vi-VN")})`;
+      const res = await createGoogleSpreadsheet(googleToken, title);
+      setSpreadsheetId(res.spreadsheetId);
+      localStorage.setItem("contest_google_spreadsheet_id", res.spreadsheetId);
+      triggerToast("Đã khởi tạo Google Spreadsheet thành công!");
+    } catch (err: any) {
+      triggerToast(err.message || "Không thể tạo Google Spreadsheet", "error");
+    } finally {
+      setIsCreatingSheet(false);
+    }
+  };
+
+  const handleSyncSubmissions = async () => {
+    if (!googleToken) {
+      triggerToast("Vui lòng kết nối tài khoản Google trước!", "error");
+      return;
+    }
+    if (!spreadsheetId.trim()) {
+      triggerToast("Vui lòng tạo bảng tính mới hoặc nhập ID bảng tính hiện có!", "error");
+      return;
+    }
+    setIsSyncingSheets(true);
+    try {
+      await syncSubmissionsToGoogleSheet(googleToken, spreadsheetId.trim(), submissions);
+      triggerToast("Đồng bộ dữ liệu sang Google Sheets thành công!");
+    } catch (err: any) {
+      triggerToast(err.message || "Đồng bộ thất bại, vui lòng kiểm tra lại quyền hạn!", "error");
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
+
   // CSV Export
   const handleExportCSV = () => {
     if (submissions.length === 0) {
@@ -912,7 +1035,7 @@ export default function App() {
 
             {/* Main Title - Luxurious Gold Text Effect */}
             <h1 
-              style={{ fontSize: "20px" }}
+              style={{ fontSize: "23px" }}
               className="font-sans font-extrabold uppercase tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-100 bg-clip-text text-transparent drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] leading-relaxed sm:leading-relaxed md:leading-snug text-center"
             >
               CUỘC THI TRỰC TUYẾN HÀNH TRÌNH 50 NĂM NGÀY THÀNH PHỐ SÀI GÒN - GIA ĐỊNH CHÍNH THỨC, VINH DỰ MANG TÊN CHỦ TỊCH HỒ CHÍ MINH
@@ -1531,6 +1654,16 @@ export default function App() {
               >
                 <Settings className="w-4 h-4" /> Thiết Lập Lịch Thi
               </button>
+              <button
+                onClick={() => setAdminSelectedTab("sheets")}
+                className={`px-6 py-3 border-b-2 font-bold text-sm focus:outline-none flex items-center gap-2 transition-all cursor-pointer ${
+                  adminSelectedTab === "sheets"
+                    ? "border-red-700 text-red-700"
+                    : "border-transparent text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                <FileSpreadsheet className="w-4 h-4" /> Liên kết Google Sheets
+              </button>
             </div>
 
             {/* Admin Section 1: Candidates list & results */}
@@ -1899,6 +2032,168 @@ export default function App() {
                     Lưu Khung Thời Gian
                   </button>
                 </form>
+              </motion.div>
+            )}
+
+            {/* Admin Section 4: Google Sheets Integration */}
+            {adminSelectedTab === "sheets" && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="max-w-2xl mx-auto space-y-6"
+              >
+                {/* Intro Card */}
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                      <FileSpreadsheet className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-sans font-extrabold text-slate-900 tracking-tight">
+                        Đồng Bộ Báo Cáo Sang Google Sheets
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Cho phép lưu trữ, biên soạn và xem kết quả hội thi trực tiếp trên Google Drive cá nhân của Ban Tổ Chức.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Step 1: Google Authentication */}
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                    <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wide">
+                      Bước 1: Kết nối tài khoản Google
+                    </h4>
+                    {googleUser ? (
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-emerald-50 text-emerald-700 uppercase tracking-wider flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Đã kết nối
+                      </span>
+                    ) : (
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-700 uppercase tracking-wider">
+                        Chưa kết nối
+                      </span>
+                    )}
+                  </div>
+
+                  {!googleUser ? (
+                    <div className="py-4 text-center space-y-4">
+                      <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
+                        Để lưu dữ liệu bài thi trực tiếp vào Google Sheets, Ban Tổ Chức cần cấp quyền quản lý các file Sheets được tạo bởi ứng dụng này trong Google Drive của bạn.
+                      </p>
+                      
+                      <button
+                        onClick={handleGoogleSignIn}
+                        className="px-6 py-3 rounded-xl bg-slate-950 hover:bg-slate-900 text-white font-bold text-xs md:text-sm flex items-center gap-2 mx-auto shadow-md transition-all cursor-pointer"
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 48 48">
+                          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                          <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                        </svg>
+                        Đăng nhập bằng Google
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col sm:flex-row justify-between items-center bg-slate-50 p-4 rounded-xl gap-3">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        {googleUser.photoURL ? (
+                          <img src={googleUser.photoURL} alt={googleUser.displayName || ""} referrerPolicy="no-referrer" className="w-10 h-10 rounded-full border border-slate-200" />
+                        ) : (
+                          <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center font-bold text-slate-700">
+                            {googleUser.displayName?.charAt(0) || "U"}
+                          </div>
+                        )}
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">{googleUser.displayName || "Quản trị viên Google"}</p>
+                          <p className="text-[10px] text-slate-500 font-mono">{googleUser.email}</p>
+                        </div>
+                      </div>
+                      
+                      <button
+                        onClick={handleGoogleSignOut}
+                        className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 font-bold text-[10px] uppercase tracking-wider transition-all cursor-pointer whitespace-nowrap"
+                      >
+                        Ngắt kết nối
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Spreadsheet Configuration */}
+                {googleUser && (
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                    <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wide border-b border-slate-100 pb-3">
+                      Bước 2: Cấu hình bảng tính (Google Spreadsheet)
+                    </h4>
+
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 uppercase tracking-wide mb-1.5">
+                          ID Bảng tính Google (Google Spreadsheet ID)
+                        </label>
+                        <input
+                          type="text"
+                          value={spreadsheetId}
+                          onChange={(e) => {
+                            setSpreadsheetId(e.target.value);
+                            localStorage.setItem("contest_google_spreadsheet_id", e.target.value);
+                          }}
+                          className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-red-700 focus:outline-none text-slate-800 font-mono text-sm"
+                          placeholder="Nhập Google Spreadsheet ID hoặc nhấn nút để tạo mới..."
+                        />
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <button
+                          type="button"
+                          onClick={handleCreateSpreadsheet}
+                          disabled={isCreatingSheet}
+                          className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-4 h-4 ${isCreatingSheet ? 'animate-spin' : ''}`} />
+                          {isCreatingSheet ? "Đang khởi tạo..." : "Khởi tạo bảng tính mới tự động"}
+                        </button>
+
+                        {spreadsheetId && (
+                          <a
+                            href={`https://docs.google.com/spreadsheets/d/${spreadsheetId}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 font-bold text-xs flex items-center justify-center gap-1.5 transition-all text-center"
+                          >
+                            <FileSpreadsheet className="w-4 h-4" /> Mở trang tính Google Sheets ↗
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Step 3: Synchronization Action */}
+                {googleUser && spreadsheetId && (
+                  <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4 text-center">
+                    <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wide border-b border-slate-100 pb-3 text-left">
+                      Bước 3: Đồng bộ hóa dữ liệu
+                    </h4>
+
+                    <div className="py-4 space-y-4">
+                      <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
+                        Đồng bộ toàn bộ {submissions.length} bài thi hiện tại từ cơ sở dữ liệu lên Google Sheets. Thao tác này sẽ dọn dẹp trang tính cũ và ghi đè một cấu trúc bảng sạch, cập nhật nhất.
+                      </p>
+
+                      <button
+                        onClick={handleSyncSubmissions}
+                        disabled={isSyncingSheets}
+                        className="px-8 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs md:text-sm uppercase tracking-wider flex items-center gap-2 mx-auto shadow-md shadow-emerald-100 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${isSyncingSheets ? 'animate-spin' : ''}`} />
+                        {isSyncingSheets ? "Đang đồng bộ..." : "Bắt đầu Đồng bộ dữ liệu ngay"}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
 

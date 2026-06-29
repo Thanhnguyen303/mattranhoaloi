@@ -3,8 +3,8 @@
   "appId": "1:249819926946:web:9acfcf4aeb2b10396a62fb",
   "apiKey": "AIzaSyCMWYRhzLO0lQ9jIVofIOdY_nn1Gr17qkY",
   "authDomain": "mythic-edge-509p9.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-trangwebhoithi50-b5c2430c-607f-4e49-b55e-0948634c74f5",
   "storageBucket": "mythic-edge-509p9.firebasestorage.app",
   "messagingSenderId": "249819926946",
-  "measurementId": ""
+  "measurementId": "",
+  "firestoreDatabaseId": "ai-studio-trangwebhoithi50-b5c2430c-607f-4e49-b55e-0948634c74f5"
 }
